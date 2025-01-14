@@ -1,0 +1,23 @@
+[infrastructure]
+# This flag determines whether the results of the evaluation should be sent
+# to the infrastructure orchastrator. For local execution, it should always
+# be set to `false`
+send_to_orchestrator = false
+
+[evaluation]
+# Time limit for the solution of each instance. Overheads introduced by the
+# evaluation script are already discounted, but this is not possible for
+# overheads in the submission web service and latency. For this reason, the
+# limit always includes some buffer time.
+time_limit = 1050
+# Step limit, used to avoid infinite loops
+max_steps = 10
+# Number of simulations to performed for every instance (used only in the
+# probabilistic evaluation)
+nsamples = 5
+# Value of the alpha coefficient in the score function
+# alpha = 0.1
+# Value of the beta coefficient in the score function
+# beta = 0.1
+# Value of the beta coefficient in the score function
+seed = 42
