@@ -3,6 +3,7 @@ import os
 import time
 import zipfile
 from io import BytesIO
+from http.client import RemoteDisconnected
 from web_service.competitor_api_utils import call_setup_api, call_plan_api, call_setup_problem_api, \
     call_start_simulation_api, call_next_action_api
 
@@ -54,6 +55,7 @@ class Configuration:
         self.nsamples = 30
         self.alpha = 0.7
         self.beta = 0.0004
+        self.reboot_time_limit = 30
 
 
 # Function to read configuration options
@@ -78,6 +80,8 @@ def conf_from_file():
             res.alpha = conf_data['evaluation']['alpha']
         if 'beta' in conf_data['evaluation']:
             res.beta = conf_data['evaluation']['beta']
+        if 'reboot_time_limit' in conf_data['evaluation']:
+            res.reboot_time_limit = conf_data['evaluation']['reboot_time_limit']
     except Exception:
         logging.error('Cannot read configuration file, using default configuration options')
 
@@ -170,7 +174,7 @@ class DeterministicEvaluationState:
     def __init__(self, prb, es):
         self.prb = prb
         self.es = es
-        self.domain = es.domain
+        self.domain = es.domain if es is not None else None
         self.elapsed_time = 0
         self.timeout = False
         self.last_state = None
@@ -206,9 +210,10 @@ class DeterministicEvaluationState:
 
 
 class CompetitionProcessor:
-    def __init__(self, competitor_model_endpoint: str, submission_id: int):
+    def __init__(self, competitor_model_endpoint: str, submission_id: int, resume: bool):
         self.competitor_model_endpoint = competitor_model_endpoint
         self.submission_id = submission_id
+        self.resume = resume
 
 
     def _retrieve_plan(self, eval_state, problem_id, json_file_path):
@@ -227,6 +232,13 @@ class CompetitionProcessor:
         )
         eval_state.elapsed_time += time.time() - tstart
         # print(f"Problem {problem_id}: plan API completed execution")
+
+        # Check for system and communication errors
+        if solution_response is None or isinstance(solution_response, dict) and 'error' in solution_response:
+            # Wait some time for a possible reboot
+            logging.info(f"A communication or resource failure may have happed for {self.submission_id}, problem {problem_id}; waiting for a possible reboot")
+            time.sleep(configuration.reboot_time_limit)
+            return None
 
         # Extract all returned files
         logging.debug(f"Problem {problem_id}: parsing the output of the plan API")
@@ -317,15 +329,24 @@ class CompetitionProcessor:
         logging.info(f"Starting deterministic competition processing for submission ID {self.submission_id} using model endpoint: {self.competitor_model_endpoint}")
 
         # Clear the temporary communication directories
-        clear_tmp_dirs(submission_id=self.submission_id)
+        if not self.resume:
+            clear_tmp_dirs(submission_id=self.submission_id)
 
         # Synchronous call to the competitor setup API
         logging.info(f"Setup for submission ID {self.submission_id}")
         response = call_setup_api(competitor_model_endpoint=self.competitor_model_endpoint, submission_id=self.submission_id)
         if response is None:
-            # Write an error message to the output folder
             logging.info(f"Setup API call failed.")
-            write_json_message(name='error', content={'message': 'Setup API call failed'}, submission_id=self.submission_id)
+            # Write an error message to the output folder
+            eval_state = DeterministicEvaluationState(prb=None, es=None)
+            outcome = eval_state.get_outcome()
+            outcome.error_msg = 'Setup API call failed'
+            write_json_message('outcome', outcome.to_json_obj(),
+                               submission_id=self.submission_id)
+            # Wait some time for a possible reboot
+            logging.info(f"A communication or resource failure may have happed for {self.submission_id}. Waiting for a possible reboot")
+            time.sleep(configuration.reboot_time_limit)
+            # write_json_message(name='error', content={'message': 'Setup API call failed'}, submission_id=self.submission_id)
             return # EARLY EXIT
 
         # Define the list of problems to be processed
@@ -337,6 +358,12 @@ class CompetitionProcessor:
         # Process each problem individually
         outcomes = []
         for problem_id, json_file_path in problems:
+            # Check if an outcome is already present
+            if self.resume:
+                output_dir = get_output_dir(self.submission_id, problem_id)
+                if os.path.isfile(os.path.join(output_dir, 'outcome.json')):
+                    logging.info(f"Resume mode enabled and past outcome deteted for submission {self.submission_id}, problem {problem_id}")
+                    continue
 
             logging.info(f"Setup for submission {self.submission_id}, problem {problem_id}")
 
@@ -357,7 +384,9 @@ class CompetitionProcessor:
             # Obtain the plan
             logging.info(f"Calling the planner API for submission {self.submission_id}, problem {problem_id}")
             plan_retrieved = self._retrieve_plan(eval_state, problem_id, json_file_path)
-            if plan_retrieved:
+            if plan_retrieved is None:
+                eval_state.error_msg = 'Plan API call failed (the available time or memory may also have been exceeded'
+            elif plan_retrieved:
                 # Simulate the plan execution
                 logging.info(f"Simulating execution for submission {self.submission_id}, problem {problem_id}")
                 execution_successful = self._execute_deterministic_plan(eval_state)
@@ -392,8 +421,13 @@ class CompetitionProcessor:
             zip_file_stream=zip_buffer
         )
 
+        if response is None:
+            # Wait some time for a possible reboot
+            logging.info(f"A communication or resource failure may have happed for {self.submission_id}, problem {problem_id}. Waiting for a possible reboot")
+            time.sleep(configuration.reboot_time_limit)
+
         # Return the status of the request
-        return response is not None
+        return response
 
 
     def _retrieve_action(self, eval_state, bstate, metadata, problem_id, simulation_id, step_id):
@@ -415,16 +449,23 @@ class CompetitionProcessor:
         )
         eval_state.elapsed_time += time.time() - tstart
 
+        # Check the time limit
+        logging.debug(f"Problem {problem_id}: checking time limit")
+        if eval_state.elapsed_time > configuration.time_limit:
+            eval_state.timeout = True
+
+        # Check whether the call was successful
+        if action_response is None or (isinstance(action_response, dict) and 'error' in action_response):
+            # Wait some time for a possible reboot
+            logging.info(f"A communication or resource failure may have happed for {self.submission_id}, problem {problem_id}. Waiting for a possible reboot")
+            time.sleep(configuration.reboot_time_limit)
+            return None
+
         # Extract all returned files
         logging.debug(f"Problem {problem_id}, simulation {simulation_id}, step {step_id}: parsing received action")
         returned_files, input_dir = extract_input_zip(action_response,
                                                       submission_id=self.submission_id, problem_id=problem_id,
                                                       simulation_id=simulation_id, step_id=step_id)
-
-        # Check the time limit
-        logging.debug(f"Problem {problem_id}: checking time limit")
-        if eval_state.elapsed_time > configuration.time_limit:
-            eval_state.timeout = True
 
         # Atttempt to retrieve the action
         action = None
@@ -449,7 +490,11 @@ class CompetitionProcessor:
 
         # If the setup failed, return an outcome
         if response is None:
+            # Report an error in the outcome
             eval_state.error_msg = 'simulation setup failed'
+            # Wait some time for a possible reboot
+            logging.info(f"A communication or resource failure may have happed for {self.submission_id}, problem {problem_id}. Waiting for a possible reboot")
+            time.sleep(configuration.reboot_time_limit)
             return eval_state.get_outcome()
 
         # Reset the domain state
@@ -534,7 +579,8 @@ class CompetitionProcessor:
         logging.info(f"Starting probabilistic competition processing for submission ID {self.submission_id} using model endpoint: {self.competitor_model_endpoint}")
 
         # Clear the temporary communication directories
-        clear_tmp_dirs(submission_id=self.submission_id)
+        if not self.resume:
+            clear_tmp_dirs(submission_id=self.submission_id)
 
         # # Synchronous call to the competitor setup API
         # print(f"Calling setup API for submission ID {self.submission_id}...")
@@ -554,6 +600,12 @@ class CompetitionProcessor:
         # Process each problem individually
         outcomes = []
         for problem_id, json_file_path in problems:
+            # Check if an outcome is already present
+            if self.resume:
+                output_dir = get_output_dir(self.submission_id, problem_id)
+                if os.path.isfile(os.path.join(output_dir, 'outcome.json')):
+                    logging.info(f"Resume mode enabled and past outcome deteted for submission {self.submission_id}, problem {problem_id}")
+                    continue
 
             logging.info(f"Setup for submission {self.submission_id}, problem {problem_id}")
 
@@ -569,7 +621,7 @@ class CompetitionProcessor:
 
             # Trigger problem setup on the submission side
             status = self._setup_problem(problem_id, json_file_path)
-            if not status:
+            if status is None:
                 # Build an outcome
                 eval_state = DeterministicEvaluationState(prb, es)
                 eval_state.error_msg = 'problem setup failed'

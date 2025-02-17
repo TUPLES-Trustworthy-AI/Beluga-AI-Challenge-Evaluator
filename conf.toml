@@ -3,6 +3,10 @@
 # to the infrastructure orchastrator. For local execution, it should always
 # be set to `false`
 send_to_orchestrator = false
+# This flag determines whether the last input and output files for a
+# submission should be cleaned; if set to true, past results are preserved
+# and the evaluation skips all problems that had already been solved
+resume = false
 
 [evaluation]
 # Time limit for the solution of each instance. Overheads introduced by the
@@ -21,3 +25,7 @@ nsamples = 5
 # beta = 0.1
 # Value of the beta coefficient in the score function
 seed = 42
+# Time allowed to reboot the submission container, in case it is terminated.
+# This is only needed for the online evaluation platform, keep it as it
+# is for local execution
+reboot_time_limit = 30

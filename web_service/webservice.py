@@ -20,6 +20,7 @@ import os
 class Configuration:
     def __init__(self):
         self.send_to_orchestrator = False
+        self.resume = False
 
 # Function to read configuration options
 def conf_from_file():
@@ -33,6 +34,8 @@ def conf_from_file():
             conf_data = tomllib.load(fp)
         if 'send_to_orchestrator' in conf_data['infrastructure']:
             res.send_to_orchestrator = conf_data['infrastructure']['send_to_orchestrator']
+        if 'resume' in conf_data['infrastructure']:
+            res.resume = conf_data['infrastructure']['resume']
     except Exception:
         print('[INFRASTRUCTURE] Cannot read configuration file, using default configuration options')
 
@@ -118,7 +121,7 @@ def process(submission_id: int, competition_type: CompetitionType, optit_endpoin
     print(f"Starting the process for submission ID {submission_id}...")  # "I'm computing.."
 
     # Instantiating the processor
-    processor = CompetitionProcessor(competitor_model_endpoint, submission_id)
+    processor = CompetitionProcessor(competitor_model_endpoint, submission_id, configuration.resume)
 
     #Process the submission based on competition type using the CompetitionType enum
     if competition_type == CompetitionType.SCALABILITY_DETERMINISTIC:
