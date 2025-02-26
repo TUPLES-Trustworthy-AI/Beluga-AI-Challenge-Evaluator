@@ -55,7 +55,6 @@ class Configuration:
         self.nsamples = 30
         self.alpha = 0.7
         self.beta = 0.0004
-        self.reboot_time_limit = 30
 
 
 # Function to read configuration options
@@ -68,6 +67,10 @@ def conf_from_file():
     try:
         with open(conf_file_path, 'rb') as fp:
             conf_data = tomllib.load(fp)
+        if 'problem_dir' in conf_data['evaluation']:
+            res.problem_dir = conf_data['evaluation']['problem_dir']
+        if 'problem_dir_prob' in conf_data['evaluation']:
+            res.problem_dir_prob = conf_data['evaluation']['problem_dir_prob']
         if 'seed' in conf_data['evaluation']:
             res.seed = conf_data['evaluation']['seed']
         if 'time_limit' in conf_data['evaluation']:
@@ -80,8 +83,7 @@ def conf_from_file():
             res.alpha = conf_data['evaluation']['alpha']
         if 'beta' in conf_data['evaluation']:
             res.beta = conf_data['evaluation']['beta']
-        if 'reboot_time_limit' in conf_data['evaluation']:
-            res.reboot_time_limit = conf_data['evaluation']['reboot_time_limit']
+
     except Exception:
         logging.error('Cannot read configuration file, using default configuration options')
 
@@ -210,10 +212,11 @@ class DeterministicEvaluationState:
 
 
 class CompetitionProcessor:
-    def __init__(self, competitor_model_endpoint: str, submission_id: int, resume: bool):
+    def __init__(self, competitor_model_endpoint: str, submission_id: int, resume: bool, reboot_time_limit: float):
         self.competitor_model_endpoint = competitor_model_endpoint
         self.submission_id = submission_id
         self.resume = resume
+        self.reboot_time_limit = reboot_time_limit
 
 
     def _retrieve_plan(self, eval_state, problem_id, json_file_path):
@@ -237,7 +240,7 @@ class CompetitionProcessor:
         if solution_response is None or isinstance(solution_response, dict) and 'error' in solution_response:
             # Wait some time for a possible reboot
             logging.info(f"A communication or resource failure may have happed for {self.submission_id}, problem {problem_id}; waiting for a possible reboot")
-            time.sleep(configuration.reboot_time_limit)
+            time.sleep(self.reboot_time_limit)
             return None
 
         # Extract all returned files
@@ -329,7 +332,7 @@ class CompetitionProcessor:
         logging.info(f"Starting deterministic competition processing for submission ID {self.submission_id} using model endpoint: {self.competitor_model_endpoint}")
 
         # Clear the temporary communication directories
-        if not self.resume:
+        if self.resume == 0:
             clear_tmp_dirs(submission_id=self.submission_id)
 
         # Synchronous call to the competitor setup API
@@ -345,7 +348,7 @@ class CompetitionProcessor:
                                submission_id=self.submission_id)
             # Wait some time for a possible reboot
             logging.info(f"A communication or resource failure may have happed for {self.submission_id}. Waiting for a possible reboot")
-            time.sleep(configuration.reboot_time_limit)
+            time.sleep(self.reboot_time_limit)
             # write_json_message(name='error', content={'message': 'Setup API call failed'}, submission_id=self.submission_id)
             return # EARLY EXIT
 
@@ -357,13 +360,21 @@ class CompetitionProcessor:
 
         # Process each problem individually
         outcomes = []
+        stored_partial_outcome_json = None
         for problem_id, json_file_path in problems:
             # Check if an outcome is already present
-            if self.resume:
+            if self.resume > 0:
                 output_dir = get_output_dir(self.submission_id, problem_id)
-                if os.path.isfile(os.path.join(output_dir, 'outcome.json')):
+                outcome_file_path = os.path.join(output_dir, 'outcome.json')
+                if os.path.isfile(outcome_file_path):
                     logging.info(f"Resume mode enabled and past outcome deteted for submission {self.submission_id}, problem {problem_id}")
-                    continue
+                    if self.resume == 1:
+                        # If in normal resume mode, just skip the instace
+                        continue
+                    elif self.resume == 2:
+                        # If in resume (re-evaluation) mode, store the outcome json object
+                        with open(outcome_file_path) as fp:
+                            stored_partial_outcome_json = json.load(fp)
 
             logging.info(f"Setup for submission {self.submission_id}, problem {problem_id}")
 
@@ -371,10 +382,15 @@ class CompetitionProcessor:
             with open(json_file_path) as fp:
                 prb = json.load(fp, cls=BelugaProblemDecoder)
 
+            # Attempt to retrive the stored (partial) outcome. This is only done in resume (re-evaluate) mode
+            stored_partial_outcome = None
+            if self.resume == 2 and stored_partial_outcome_json:
+                stored_partial_outcome = SingleSimulationOutcome.from_json_obj(stored_partial_outcome_json,
+                                                                               prb, configuration.alpha, configuration.beta)
             # Build an SKD domain
             domain = SkdPDDLDomain(prb, problem_name=str(problem_id), classic=False)
 
-            # Build an support object
+            # Build a support object
             es = EvaluationSupport(prb, domain)
             es.refresh_cache()
 
@@ -382,16 +398,29 @@ class CompetitionProcessor:
             eval_state = DeterministicEvaluationState(prb, es)
 
             # Obtain the plan
-            logging.info(f"Calling the planner API for submission {self.submission_id}, problem {problem_id}")
-            plan_retrieved = self._retrieve_plan(eval_state, problem_id, json_file_path)
+            logging.info(f"Retrieving a plan for submission {self.submission_id}, problem {problem_id}")
+            plan_retrieved = False
+            if self.resume == 2 and stored_partial_outcome:
+                if stored_partial_outcome.plan and not stored_partial_outcome.time_limit_reached:
+                    plan_retrieved = True
+                    eval_state.plan = stored_partial_outcome.plan
+                    eval_state.elapsed_time = stored_partial_outcome.plan_construction_time
+                else:
+                    continue # NOTE move to the next instance (there's no valid plan to re-evaluate)
+            else:
+                plan_retrieved = self._retrieve_plan(eval_state, problem_id, json_file_path)
+
+            # Simulate the plan
             if plan_retrieved is None:
                 eval_state.error_msg = 'Plan API call failed (the available time or memory may also have been exceeded'
             elif plan_retrieved:
-                # Simulate the plan execution
                 logging.info(f"Simulating execution for submission {self.submission_id}, problem {problem_id}")
-                execution_successful = self._execute_deterministic_plan(eval_state)
-            # Retrieve and store final outcome
+                self._execute_deterministic_plan(eval_state)
+
+            # Retrieve the final outcome
             outcome = eval_state.get_outcome()
+
+            # Store the final outcome
             outcomes.append(outcome)
 
             # Write the final outcome
@@ -424,7 +453,7 @@ class CompetitionProcessor:
         if response is None:
             # Wait some time for a possible reboot
             logging.info(f"A communication or resource failure may have happed for {self.submission_id}, problem {problem_id}. Waiting for a possible reboot")
-            time.sleep(configuration.reboot_time_limit)
+            time.sleep(self.reboot_time_limit)
 
         # Return the status of the request
         return response
@@ -458,7 +487,7 @@ class CompetitionProcessor:
         if action_response is None or (isinstance(action_response, dict) and 'error' in action_response):
             # Wait some time for a possible reboot
             logging.info(f"A communication or resource failure may have happed for {self.submission_id}, problem {problem_id}. Waiting for a possible reboot")
-            time.sleep(configuration.reboot_time_limit)
+            time.sleep(self.reboot_time_limit)
             return None
 
         # Extract all returned files
@@ -494,7 +523,7 @@ class CompetitionProcessor:
             eval_state.error_msg = 'simulation setup failed'
             # Wait some time for a possible reboot
             logging.info(f"A communication or resource failure may have happed for {self.submission_id}, problem {problem_id}. Waiting for a possible reboot")
-            time.sleep(configuration.reboot_time_limit)
+            time.sleep(self.reboot_time_limit)
             return eval_state.get_outcome()
 
         # Reset the domain state
@@ -579,7 +608,7 @@ class CompetitionProcessor:
         logging.info(f"Starting probabilistic competition processing for submission ID {self.submission_id} using model endpoint: {self.competitor_model_endpoint}")
 
         # Clear the temporary communication directories
-        if not self.resume:
+        if self.resume == 0:
             clear_tmp_dirs(submission_id=self.submission_id)
 
         # # Synchronous call to the competitor setup API
@@ -601,7 +630,7 @@ class CompetitionProcessor:
         outcomes = []
         for problem_id, json_file_path in problems:
             # Check if an outcome is already present
-            if self.resume:
+            if self.resume > 0:
                 output_dir = get_output_dir(self.submission_id, problem_id)
                 if os.path.isfile(os.path.join(output_dir, 'outcome.json')):
                     logging.info(f"Resume mode enabled and past outcome deteted for submission {self.submission_id}, problem {problem_id}")

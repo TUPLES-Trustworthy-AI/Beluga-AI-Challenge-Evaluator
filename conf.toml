@@ -1,31 +1,50 @@
 [infrastructure]
 # This flag determines whether the results of the evaluation should be sent
 # to the infrastructure orchastrator. For local execution, it should always
-# be set to `false`
+# be set to `false`.
 send_to_orchestrator = false
-# This flag determines whether the last input and output files for a
-# submission should be cleaned; if set to true, past results are preserved
-# and the evaluation skips all problems that had already been solved
-resume = false
+# This option determines whether the last input and output files for a
+# submission should be cleaned. The podsible values are:
+#   0: all files related to the current submission (default)
+#   1: all problems with existing outcome files will not be re-solved
+#   2: like 1, except that any plan from the existing outcomes will be
+#      re-evaluated. This is useful in case some scoring parameter change,
+#      but it won't be enough in case the changed parameters affect the
+#      plan construction. In general, you should avoid using this value
+#      unless you are very familiar with how the evaluation system works
+resume = 0
+# Time allowed to reboot the submission container, in case it is terminated.
+# This is only needed for the online evaluation platform, keep it as it
+# is for local execution. If left commented, the parameter is set to the
+# default (30)
+reboot_time_limit = 30
 
 [evaluation]
+# Directory with the benchmark instances for the deterministic challenge.
+# It is recommended that you leave this to the default
+problem_dir = "../benchmarks/scalability_challenge/deterministic/training/"
+# Directory with the benchmark instances for the probabilistic challenge.
+# It is recommended that you leave this to the default
+problem_dir_prob = "../benchmarks/scalability_challenge/probabilistic/arrivals/training/"
 # Time limit for the solution of each instance. Overheads introduced by the
 # evaluation script are already discounted, but this is not possible for
 # overheads in the submission web service and latency. For this reason, the
-# limit always includes some buffer time.
+# limit always includes some buffer time. If left commented, the parameter
+# is set to the default (1050)
 time_limit = 1050
-# Step limit, used to avoid infinite loops
+# Step limit, used to avoid infinite loops. If left commented, the parameter
+# is set to the default
 max_steps = 10
 # Number of simulations to performed for every instance (used only in the
-# probabilistic evaluation)
+# probabilistic evaluation). If left commented, the parameter is set to the
+# default
 nsamples = 5
-# Value of the alpha coefficient in the score function
+# Value of the alpha coefficient in the score function. If left commented,
+# the parameter is set to the default
 # alpha = 0.1
-# Value of the beta coefficient in the score function
+# Value of the beta coefficient in the score function. If left commented,
+# the parameter is set to the default
 # beta = 0.1
-# Value of the beta coefficient in the score function
+# Value of the beta coefficient in the score function.  If left commented,
+# the parameter is set to the default
 seed = 42
-# Time allowed to reboot the submission container, in case it is terminated.
-# This is only needed for the online evaluation platform, keep it as it
-# is for local execution
-reboot_time_limit = 30
