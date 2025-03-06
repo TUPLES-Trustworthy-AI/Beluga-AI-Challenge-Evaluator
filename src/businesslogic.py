@@ -178,7 +178,6 @@ class DeterministicEvaluationState:
         self.es = es
         self.domain = es.domain if es is not None else None
         self.elapsed_time = 0
-        self.timeout = False
         self.last_state = None
         self.error_msg = None
         self.plan = BelugaPlan()
@@ -251,7 +250,7 @@ class CompetitionProcessor:
         # Check the time limit
         logging.debug(f"Problem {problem_id}: checking time limit")
         if eval_state.elapsed_time > configuration.time_limit:
-            eval_state.timeout = True
+            eval_state.time_limit_reached = True
 
         # Atttempt to retrieve the plan
         logging.debug(f"Problem {problem_id}: retrieving the plan")
@@ -261,7 +260,7 @@ class CompetitionProcessor:
                 eval_state.plan = BelugaPlan.from_json_obj(json_obj, eval_state.prb)
 
         # Return succes flag
-        if eval_state.plan is None or eval_state.timeout:
+        if eval_state.plan is None or eval_state.time_limit_reached:
             return False
         else:
             return True
@@ -483,7 +482,7 @@ class CompetitionProcessor:
         # Check the time limit after the action has been generated
         logging.debug(f"Problem {problem_id}: checking time limit")
         if past_elapsed_time + eval_state.elapsed_time > configuration.time_limit:
-            eval_state.timeout = True
+            eval_state.time_limit_reached = True
 
         # Check whether the call was successful
         if action_response is None or (isinstance(action_response, dict) and 'error' in action_response):
@@ -561,7 +560,7 @@ class CompetitionProcessor:
                 # First time limit check (used to detect whether the cumulative limit
                 # has already been exceeded)
                 if past_elapsed_time >= configuration.time_limit:
-                    eval_state.timeout = True
+                    eval_state.time_limit_reached = True
                     return eval_state.get_outcome()
 
                 # Obtain the current metadata
@@ -575,7 +574,7 @@ class CompetitionProcessor:
                                            past_elapsed_time=past_elapsed_time)
 
                 # Handle timeouts
-                if eval_state.timeout:
+                if eval_state.time_limit_reached:
                     return eval_state.get_outcome()
 
                 # Handle the case where no action is returned
