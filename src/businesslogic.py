@@ -51,7 +51,7 @@ class Configuration:
         # Configurable options (edit the "conf.toml" file to change these)
         self.seed = None
         self.time_limit = 15 * (60+10) # 15 minutes, plus 10 sec of overhead buffer, by default
-        self.max_steps = 100000
+        self.max_steps = 20
         self.nsamples = 30
         self.alpha = 0.7
         self.beta = 0.0004
@@ -192,6 +192,7 @@ class DeterministicEvaluationState:
 
     def get_outcome(self):
         free_racks = self.es._get_free_racks(self.final_state) if self.final_state is not None else 0
+        scaled_max_steps = len(self.prb.jigs) * configuration.max_steps
         return SingleSimulationOutcome(plan_construction_time=self.elapsed_time,
                                        error_msg=self.error_msg,
                                        plan=self.plan,
@@ -201,7 +202,7 @@ class DeterministicEvaluationState:
                                        abrupt_plan_end=self.abrupt_plan_end,
                                        invalid_plan=self.invalid_plan,
                                        time_limit_reached=self.time_limit_reached,
-                                       step_limit_reached=(self.final_step==configuration.max_steps-1),
+                                       step_limit_reached=(self.final_step==scaled_max_steps-1),
                                        free_racks=free_racks,
                                        prb=self.prb,
                                        alpha=configuration.alpha,
@@ -276,7 +277,8 @@ class CompetitionProcessor:
         state = eval_state.domain.reset()
 
         # Start plan execution
-        for step in range(configuration.max_steps):
+        scaled_max_steps = len(eval_state.prb.jigs) * configuration.max_steps
+        for step in range(scaled_max_steps):
             try:
                 # Determine the currently processed flight
                 cbeluga = eval_state.es._get_current_beluga(state)
@@ -459,7 +461,7 @@ class CompetitionProcessor:
         return response
 
 
-    def _retrieve_action(self, eval_state, bstate, metadata, problem_id, simulation_id, step_id):
+    def _retrieve_action(self, eval_state, bstate, metadata, problem_id, simulation_id, step_id, past_elapsed_time):
         # zip the current state and metadata
         state_and_metadata = {'state': bstate.to_json_obj(), 'metadata': metadata.to_json_obj()}
         state_and_metadata_zip = zip_json_object(json.dumps(state_and_metadata),
@@ -478,9 +480,9 @@ class CompetitionProcessor:
         )
         eval_state.elapsed_time += time.time() - tstart
 
-        # Check the time limit
+        # Check the time limit after the action has been generated
         logging.debug(f"Problem {problem_id}: checking time limit")
-        if eval_state.elapsed_time > configuration.time_limit:
+        if past_elapsed_time + eval_state.elapsed_time > configuration.time_limit:
             eval_state.timeout = True
 
         # Check whether the call was successful
@@ -496,7 +498,7 @@ class CompetitionProcessor:
                                                       submission_id=self.submission_id, problem_id=problem_id,
                                                       simulation_id=simulation_id, step_id=step_id)
 
-        # Atttempt to retrieve the action
+        # Attempt to retrieve the action
         action = None
         if configuration.action_file_name in returned_files:
             with open(os.path.join(input_dir, configuration.action_file_name)) as fp:
@@ -507,7 +509,7 @@ class CompetitionProcessor:
         return action
 
 
-    def _run_simulation(self, problem_id, simulation_id, prb, domain, es):
+    def _run_simulation(self, problem_id, simulation_id, prb, domain, es, past_elapsed_time):
         # Build an object to track the evaluation state
         eval_state = DeterministicEvaluationState(prb, es)
 
@@ -536,7 +538,8 @@ class CompetitionProcessor:
 
         # Build a plan dynamically
         eval_state.plan = BelugaPlan()
-        for step_id in range(configuration.max_steps):
+        scaled_max_steps = len(eval_state.prb.jigs) * configuration.max_steps
+        for step_id in range(scaled_max_steps):
             try:
                 # Record the step
                 eval_state.final_step = step_id
@@ -555,6 +558,12 @@ class CompetitionProcessor:
                     eval_state.goal_reached = True
                     break
 
+                # First time limit check (used to detect whether the cumulative limit
+                # has already been exceeded)
+                if past_elapsed_time >= configuration.time_limit:
+                    eval_state.timeout = True
+                    return eval_state.get_outcome()
+
                 # Obtain the current metadata
                 metadata = ProbabilisticPlanningMetatada(step_id, eval_state.elapsed_time)
 
@@ -562,7 +571,8 @@ class CompetitionProcessor:
                 ba = self._retrieve_action(eval_state,
                                            bstate, metadata,
                                            problem_id=problem_id,
-                                           simulation_id=simulation_id, step_id=step_id)
+                                           simulation_id=simulation_id, step_id=step_id,
+                                           past_elapsed_time=past_elapsed_time)
 
                 # Handle timeouts
                 if eval_state.timeout:
@@ -661,11 +671,14 @@ class CompetitionProcessor:
             # Run simulations
             logging.info(f"Running simulations for submission {self.submission_id}, problem {problem_id}")
             sim_outcomes = []
+            total_elapsed_time = 0
             for simulation_id in range(configuration.nsamples):
+                # Run a simulation
                 logging.debug(f"Simulation {simulation_id} for: {problem_id}")
                 sim_outcome = self._run_simulation(problem_id=problem_id, simulation_id=simulation_id,
-                                                   prb=prb, domain=domain, es=es)
-
+                                                   prb=prb, domain=domain, es=es, past_elapsed_time=total_elapsed_time)
+                # Update elapsed time
+                total_elapsed_time += sim_outcome.plan_construction_time
                 # Store the outcome in a temporary list
                 sim_outcomes.append(sim_outcome)
 

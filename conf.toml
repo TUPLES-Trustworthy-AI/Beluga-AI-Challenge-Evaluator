@@ -34,11 +34,11 @@ problem_dir_prob = "../benchmarks/scalability_challenge/probabilistic/arrivals/t
 time_limit = 1050
 # Step limit, used to avoid infinite loops. If left commented, the parameter
 # is set to the default
-max_steps = 10
+max_steps = 5
 # Number of simulations to performed for every instance (used only in the
 # probabilistic evaluation). If left commented, the parameter is set to the
 # default
-nsamples = 5
+nsamples = 2
 # Value of the alpha coefficient in the score function. If left commented,
 # the parameter is set to the default
 # alpha = 0.1
